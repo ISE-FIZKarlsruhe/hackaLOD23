@@ -1,9 +1,26 @@
 <html>
 <head>
+  <link href="https://unpkg.com/@triply/yasgui/build/yasgui.min.css" rel="stylesheet" type="text/css" />
+  <script src="https://unpkg.com/@triply/yasgui/build/yasgui.min.js"></script>
+<style>
+  .yasgui .autocompleteWrapper {
+    display: none !important;
+  }
+</style>
+
 </head>
 <body>
-<div style="width: 50vw; height: 50vh; margin: auto;">
-    <h1>HackaLOD 2023</h1>    
+<div style="width: 80vw; height: 50vh; margin: auto;">
+    <h1>HackaLOD 2023</h1>
+
+<div id="yasgui"></div>
+  <script>
+const yasgui = new Yasgui(document.getElementById("yasgui"), {
+  requestConfig: { endpoint: "http://localhost:8000/sparql" },
+  copyEndpointOnNewTab: false,
+});
+  </script>    
+
 </div>
 </body>
 </html>

@@ -9,6 +9,28 @@ from fastapi.responses import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from .config import ORIGINS
+from tree_sitter import Language, Parser
+from typing import Optional
+import faiss
+import pickle, os, sys
+from urllib.parse import parse_qs
+from sentence_transformers import SentenceTransformer, util
+
+model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+
+FIDX = pickle.load(open("faissidx_goudatm_literals.pkl", "rb"))
+F_LITERALS = pickle.load(open("goudatm_literals.pkl", "rb"))
+
+X_ENDPOINT = "https://www.goudatijdmachine.nl/sparql/repositories/gtm"
+
+if sys.platform == "darwin":
+    SPARQL = Language("/usr/local/lib/sparql.dylib", "sparql")
+else:
+    SPARQL = Language("/usr/local/lib/sparql.so", "sparql")
+
+PARSER = Parser()
+PARSER.set_language(SPARQL)
+
 
 app = FastAPI(openapi_url="/openapi")
 app.add_middleware(
@@ -28,3 +50,120 @@ async def homepage(request: Request):
         "homepage.html",
         {"request": request},
     )
+
+
+@app.post("/sparql")
+async def sparql_post_sparql_query(
+    request: Request,
+):
+    content_type = request.headers.get("content-type")
+    body = await request.body()
+    body = body.decode("utf8")
+
+    if content_type.startswith("application/sparql-query"):
+        return await sparql_get(request, body)
+    if content_type.startswith("application/x-www-form-urlencoded"):
+        params = parse_qs(body)
+        return await sparql_get(request, params["query"][0])
+
+    raise HTTPException(status_code=400, detail="This request is malformed")
+
+
+@app.get("/sparql")
+async def sparql_get(
+    request: Request,
+    query: Optional[str] = Query(None),
+):
+    q = rewrite_query(query)
+    # print(q)
+
+
+def search(search_str: str, k_nearest: int = 10):
+    search_emb = model.encode(
+        [search_str], convert_to_tensor=True, show_progress_bar=True
+    )
+    search_vectors = (
+        search_emb.cpu().detach().numpy()
+    )  # type(ml_embeddings) = torch.Tensor
+    faiss.normalize_L2(search_vectors)
+    _, similarities_ids = FIDX.search(search_vectors, k=k_nearest * 2)
+    # print(similarities_ids)
+    # for si in similarities_ids[0]:
+    #    print(F_LITERALS.subj.loc[si], F_LITERALS.pred.loc[si], F_LITERALS.obj.loc[si])
+    return set([F_LITERALS.subj.loc[si] for si in similarities_ids[0]])
+
+
+def rewrite_query(query: str):
+    tree = PARSER.parse(query.encode("utf8"))
+    q = SPARQL.query(
+        """((triples_same_subject (var) @var (property_list (property (path_element (iri_reference) @predicate) (object_list (rdf_literal) @q_object)))) @tss (".")* @tss_dot )"""
+    )
+    found_vars = []
+    found = False
+    start_byte = end_byte = 0
+    var_name = q_object = None
+    for n, name in q.captures(tree.root_node):
+        if name == "tss":
+            if start_byte > 0 and end_byte > start_byte:
+                if var_name is not None and q_object is not None and found:
+                    found_vars.append((start_byte, end_byte, var_name, q_object))
+            start_byte = n.start_byte
+            end_byte = n.end_byte
+            var_name = q_object = None
+            found = False
+        if name == "q_object":
+            q_object = n.text.decode("utf8")
+        if name == "predicate" and n.text == b"<http://hackalod/fizzy>":
+            found = True
+        if name == "var":
+            var_name = n.text.decode("utf8")
+        if name == "tss_dot":
+            end_byte = n.end_byte
+
+    # If there is only one,
+    if start_byte > 0 and end_byte > start_byte:
+        if var_name is not None and q_object is not None and found:
+            found_vars.append((start_byte, end_byte, var_name, q_object))
+
+    if len(found_vars) > 0:
+        newq = []
+        for i, c in enumerate(query.encode("utf8")):
+            in_found = False
+            for start_byte, end_byte, var_name, q_object in found_vars:
+                if i >= start_byte and i <= end_byte:
+                    if not in_found:
+                        fts_results = search(q_object.strip('"'))
+                        fts_results = " ".join(
+                            [
+                                f"<{fts_result}>"
+                                for fts_result in fts_results
+                                if not fts_result.startswith("_:")
+                            ]
+                        )
+                        if fts_results:
+                            newq.append(f"VALUES {var_name} {{{fts_results}}}")
+                    in_found = True
+            if not in_found:
+                newq.append(chr(c))
+        newq = "".join(newq)
+        query = newq
+    return query
+
+
+async def external_sparql(endpoint: str, query: str):
+    async with httpx.AsyncClient(timeout=45) as client:
+        headers = {
+            "Accept": "application/sparql-results+json",
+            "User-Agent": "SCHMARQL/2022 (https://epoz.org/schmarql/ ep@epoz.org)",
+        }
+        data = {"query": query}
+        logging.debug("SPARQL query on \n%s query=%s", endpoint, quote(query))
+        logging.debug(data)
+        r = await client.post(
+            endpoint,
+            data=data,
+            headers=headers,
+        )
+    if r.status_code == 200:
+        return r.json()
+    return {"exception": r.status_code, "txt": r.text}

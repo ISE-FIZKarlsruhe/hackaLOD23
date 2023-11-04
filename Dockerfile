@@ -1,4 +1,4 @@
-FROM python:3.9.7 as builder
+FROM python:3.10 as builder
 
 RUN apt update && apt install -y gcc g++ libffi-dev libc-dev make libsqlite3-dev git perl \
     && git clone --recursive https://github.com/epoz/fts5-snowball.git
@@ -15,7 +15,7 @@ RUN git clone https://github.com/epoz/tree-sitter-sparql
 RUN pip install tree-sitter==0.20.1
 RUN python -c "from tree_sitter import Language; Language.build_library('b/sparql.so', ['tree-sitter-sparql'])"
 
-FROM python:3.9.7
+FROM python:3.10
 
 COPY --from=builder /fts5-snowball/fts5stemmer.so /usr/local/lib/
 COPY --from=builder /spellfix/spellfix.so /usr/local/lib/
@@ -32,4 +32,4 @@ RUN pip install -r requirements.txt
 
 COPY src .
 
-CMD ["uvicorn", "--workers", "4", "--host", "0.0.0.0", "--port", "8000", "app:app", "--log-level", "debug" ]
+CMD ["uvicorn", "--workers", "1", "--host", "0.0.0.0", "--port", "8000", "app:app", "--log-level", "debug" ]

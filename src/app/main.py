@@ -8,7 +8,7 @@ from fastapi.responses import (
     RedirectResponse,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from .config import ORIGINS
+from .config import ORIGINS, DEBUG, DATA_PATH
 from tree_sitter import Language, Parser
 from typing import Optional
 import faiss
@@ -17,11 +17,19 @@ import pickle, os, sys, logging, json
 from urllib.parse import parse_qs, quote
 from sentence_transformers import SentenceTransformer, util
 
-logging.basicConfig(level=logging.DEBUG)
-model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+if DEBUG == "1":
+    logging.basicConfig(level=logging.DEBUG)
 
-FIDX = pickle.load(open("faissidx_goudatm_literals.pkl", "rb"))
-F_LITERALS = pickle.load(open("goudatm_literals.pkl", "rb"))
+
+def odata(filename):
+    filepath = os.path.join(DATA_PATH, filename)
+    logging.debug(f"Opening {filepath}")
+    return pickle.load(open(filepath, "rb"))
+
+
+model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+FIDX = odata("faissidx_goudatm_literals.pkl")
+F_LITERALS = odata("goudatm_literals.pkl")
 
 X_ENDPOINT = "https://www.goudatijdmachine.nl/sparql/repositories/gtm"
 
@@ -76,6 +84,7 @@ async def sparql_get(
     request: Request,
     query: Optional[str] = Query(None),
 ):
+    logging.debug(f"Starting /sparql query")
     accept_header = request.headers.get("accept")
     if accept_header:
         accept_headers = [ah.strip() for ah in accept_header.split(",")]
@@ -83,6 +92,7 @@ async def sparql_get(
         accept_headers = []
 
     q = rewrite_query(query)
+    logging.debug("Query has been rewritten")
     results = await external_sparql(X_ENDPOINT, q)
 
     if "application/sparql-results+json" in accept_headers:
@@ -96,17 +106,12 @@ async def sparql_get(
 
 
 def search(search_str: str, k_nearest: int = 10):
-    search_emb = model.encode(
-        [search_str], convert_to_tensor=True, show_progress_bar=True
-    )
-    search_vectors = (
-        search_emb.cpu().detach().numpy()
-    )  # type(ml_embeddings) = torch.Tensor
+    logging.debug(f"Searching for: [{search_str}]")
+    search_emb = model.encode([search_str], convert_to_tensor=True)
+    search_vectors = search_emb.cpu().detach().numpy()
     faiss.normalize_L2(search_vectors)
     _, similarities_ids = FIDX.search(search_vectors, k=k_nearest * 2)
-    # print(similarities_ids)
-    # for si in similarities_ids[0]:
-    #    print(F_LITERALS.subj.loc[si], F_LITERALS.pred.loc[si], F_LITERALS.obj.loc[si])
+    logging.debug("Found results")
     return set([F_LITERALS.subj.loc[si] for si in similarities_ids[0]])
 
 

@@ -13,7 +13,7 @@ from tree_sitter import Language, Parser
 from typing import Optional
 import faiss
 import httpx
-import pickle, os, sys, logging
+import pickle, os, sys, logging, json
 from urllib.parse import parse_qs, quote
 from sentence_transformers import SentenceTransformer, util
 
@@ -76,8 +76,22 @@ async def sparql_get(
     request: Request,
     query: Optional[str] = Query(None),
 ):
+    accept_header = request.headers.get("accept")
+    if accept_header:
+        accept_headers = [ah.strip() for ah in accept_header.split(",")]
+    else:
+        accept_headers = []
+
     q = rewrite_query(query)
     results = await external_sparql(X_ENDPOINT, q)
+
+    if "application/sparql-results+json" in accept_headers:
+        return Response(
+            json.dumps(results),
+            media_type="application/sparql-results+json",
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
     return JSONResponse(results)
 
 
@@ -162,7 +176,7 @@ async def external_sparql(endpoint: str, query: str):
     async with httpx.AsyncClient(timeout=45) as client:
         headers = {
             "Accept": "application/sparql-results+json",
-            "User-Agent": "SCHMARQL/2022 (https://epoz.org/schmarql/ ep@epoz.org)",
+            "User-Agent": "Hack-a-LOD/2023 (https://epoz.org/ ep@epoz.org)",
         }
         data = {"query": query}
         logging.debug("SPARQL query on \n%s query=%s", endpoint, quote(query))

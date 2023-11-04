@@ -3,3 +3,9 @@ fastapi==0.65.2
 aiofiles==0.4.0
 tree-sitter==0.20.1
 Jinja2==3.0.3
+faiss-cpu==1.7.2
+numpy==1.25.0
+httpx==0.21.1
+sentence-transformers==2.2.0
+huggingface-hub==0.4.0
+pandas==2.0.2

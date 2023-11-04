@@ -12,10 +12,12 @@ from .config import ORIGINS
 from tree_sitter import Language, Parser
 from typing import Optional
 import faiss
-import pickle, os, sys
-from urllib.parse import parse_qs
+import httpx
+import pickle, os, sys, logging
+from urllib.parse import parse_qs, quote
 from sentence_transformers import SentenceTransformer, util
 
+logging.basicConfig(level=logging.DEBUG)
 model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 
 FIDX = pickle.load(open("faissidx_goudatm_literals.pkl", "rb"))
@@ -75,7 +77,8 @@ async def sparql_get(
     query: Optional[str] = Query(None),
 ):
     q = rewrite_query(query)
-    # print(q)
+    results = await external_sparql(X_ENDPOINT, q)
+    return JSONResponse(results)
 
 
 def search(search_str: str, k_nearest: int = 10):
@@ -127,24 +130,29 @@ def rewrite_query(query: str):
 
     if len(found_vars) > 0:
         newq = []
-        for i, c in enumerate(query.encode("utf8")):
+        query_bytes = query.encode("utf8")
+        i = 0
+        while i < len(query_bytes):
+            c = query_bytes[i]
             in_found = False
             for start_byte, end_byte, var_name, q_object in found_vars:
                 if i >= start_byte and i <= end_byte:
-                    if not in_found:
-                        fts_results = search(q_object.strip('"'))
-                        fts_results = " ".join(
-                            [
-                                f"<{fts_result}>"
-                                for fts_result in fts_results
-                                if not fts_result.startswith("_:")
-                            ]
-                        )
-                        if fts_results:
-                            newq.append(f"VALUES {var_name} {{{fts_results}}}")
                     in_found = True
+                    fts_results = search(q_object.strip('"'))
+                    fts_results = " ".join(
+                        [
+                            f"<{fts_result}>"
+                            for fts_result in fts_results
+                            if not fts_result.startswith("_:")
+                        ]
+                    )
+                    if fts_results:
+                        for cc in f"VALUES {var_name} {{{fts_results}}}":
+                            newq.append(cc)
+                    i = end_byte
             if not in_found:
                 newq.append(chr(c))
+            i += 1
         newq = "".join(newq)
         query = newq
     return query

@@ -4,18 +4,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
-    PlainTextResponse,
-    RedirectResponse,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from .config import ORIGINS, DEBUG, DATA_PATH
+from .config import ORIGINS, DEBUG, DATA_PATH, DB_PATH
 from tree_sitter import Language, Parser
 from typing import Optional
 import faiss
 import httpx
-import pickle, os, sys, logging, json
+import pickle, os, sys, logging, json, sqlite3
 from urllib.parse import parse_qs, quote
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer
+
+PREDICATE_SBERT = "<http://hackalod/fizzy/sbert>"
+PREDICATE_FTS = "<http://hackalod/fizzy/fts>"
 
 if DEBUG == "1":
     logging.basicConfig(level=logging.DEBUG)
@@ -27,11 +28,16 @@ def odata(filename):
     return pickle.load(open(filepath, "rb"))
 
 
-model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
-FIDX = odata("faissidx_goudatm_literals.pkl")
-F_LITERALS = odata("goudatm_literals.pkl")
+# model = SentenceTransformer("jegormeister/bert-base-dutch-cased-snli")
+# FIDX = odata("faissidx_dutch.pkl")
+# F_LITERALS = odata("goudatm_literals.pkl")
+# X_ENDPOINT = "https://www.goudatijdmachine.nl/sparql/repositories/gtm"
 
-X_ENDPOINT = "https://www.goudatijdmachine.nl/sparql/repositories/gtm"
+
+model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+FIDX = odata("faissidx_rijksmuseum.pkl")
+F_LITERALS = odata("df_rijksmuseum.pkl")
+X_ENDPOINT = "https://api.data.netwerkdigitaalerfgoed.nl/datasets/Rijksmuseum/collection/services/collection/sparql"
 
 if sys.platform == "darwin":
     SPARQL = Language("/usr/local/lib/sparql.dylib", "sparql")
@@ -40,6 +46,37 @@ else:
 
 PARSER = Parser()
 PARSER.set_language(SPARQL)
+
+DB_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS literal_index USING fts5(subject UNINDEXED, predicate UNINDEXED, txt);
+CREATE VIRTUAL TABLE IF NOT EXISTS literal_index_vocab USING fts5vocab('literal_index', 'row');
+CREATE VIRTUAL TABLE IF NOT EXISTS literal_index_spellfix USING spellfix1;
+"""
+DB = sqlite3.connect(DB_PATH)
+DB.enable_load_extension(True)
+if sys.platform == "darwin":
+    DB.load_extension("/usr/local/lib/fts5stemmer.dylib")
+    DB.load_extension("/usr/local/lib/spellfix.dylib")
+else:
+    DB.load_extension("/usr/local/lib/spellfix")
+    DB.load_extension("/usr/local/lib/fts5stemmer")
+
+
+DB.executescript(DB_SCHEMA)
+
+for row in DB.execute("SELECT count(*) FROM literal_index"):
+    count = row[0]
+    if count < 1:
+        logging.debug("FTS not available, now making one")
+        buf = [
+            (row["subj"], row["pred"], row["obj"])
+            for index, row in F_LITERALS.iterrows()
+        ]
+        DB.executemany(f"INSERT INTO literal_index VALUES (?, ?, ?)", buf)
+        DB.execute(
+            "INSERT INTO literal_index_spellfix(word) select term from literal_index_vocab"
+        )
+        DB.commit()
 
 
 app = FastAPI(openapi_url="/openapi")
@@ -105,7 +142,19 @@ async def sparql_get(
     return JSONResponse(results)
 
 
-def search(search_str: str, k_nearest: int = 10):
+def search_fts(search_str: str):
+    try:
+        cursor = DB.execute(
+            # "SELECT distinct subject FROM literal_index WHERE txt match ?",
+            "SELECT distinct subject FROM literal_index WHERE txt match (SELECT word FROM literal_index_spellfix WHERE word MATCH ? LIMIT 2)",
+            (search_str,),
+        )
+    except sqlite3.OperationalError:
+        return []
+    return [row[0] for row in cursor.fetchall()]
+
+
+def search_sbert(search_str: str, k_nearest: int = 20):
     logging.debug(f"Searching for: [{search_str}]")
     search_emb = model.encode([search_str], convert_to_tensor=True)
     search_vectors = search_emb.cpu().detach().numpy()
@@ -124,6 +173,7 @@ def rewrite_query(query: str):
     found = False
     start_byte = end_byte = 0
     var_name = q_object = None
+    predicate = None
     for n, name in q.captures(tree.root_node):
         if name == "tss":
             if start_byte > 0 and end_byte > start_byte:
@@ -135,7 +185,11 @@ def rewrite_query(query: str):
             found = False
         if name == "q_object":
             q_object = n.text.decode("utf8")
-        if name == "predicate" and n.text == b"<http://hackalod/fizzy>":
+        if name == "predicate" and n.text == PREDICATE_SBERT.encode("utf8"):
+            predicate = PREDICATE_SBERT
+            found = True
+        if name == "predicate" and n.text == PREDICATE_FTS.encode("utf8"):
+            predicate = PREDICATE_FTS
             found = True
         if name == "var":
             var_name = n.text.decode("utf8")
@@ -145,7 +199,7 @@ def rewrite_query(query: str):
     # If there is only one,
     if start_byte > 0 and end_byte > start_byte:
         if var_name is not None and q_object is not None and found:
-            found_vars.append((start_byte, end_byte, var_name, q_object))
+            found_vars.append((start_byte, end_byte, var_name, q_object, predicate))
 
     if len(found_vars) > 0:
         newq = []
@@ -154,10 +208,13 @@ def rewrite_query(query: str):
         while i < len(query_bytes):
             c = query_bytes[i]
             in_found = False
-            for start_byte, end_byte, var_name, q_object in found_vars:
+            for start_byte, end_byte, var_name, q_object, predicate in found_vars:
                 if i >= start_byte and i <= end_byte:
                     in_found = True
-                    fts_results = search(q_object.strip('"'))
+                    if predicate == PREDICATE_SBERT:
+                        fts_results = search_sbert(q_object.strip('"'))
+                    if predicate == PREDICATE_FTS:
+                        fts_results = search_fts(q_object.strip('"'))
                     fts_results = " ".join(
                         [
                             f"<{fts_result}>"

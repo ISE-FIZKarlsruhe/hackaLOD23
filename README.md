@@ -1,6 +1,6 @@
 # HackaLOD 2023
 
-[HackaLOD](https://netwerkdigitaalerfgoed.nl/hackalod/) Gouda 2023.
+[HackaLOD Gouda 2023](https://netwerkdigitaalerfgoed.nl/nieuws/hackalod-2023-dit-zijn-de-toepassingen-met-erfgoeddata-voor-publiek-en-collegas/) .
 
 Intro to [teams](https://www.instagram.com/p/CzTNa4JpvDk/)
 
@@ -8,7 +8,7 @@ Intro to [teams](https://www.instagram.com/p/CzTNa4JpvDk/)
 
 To run this on your computer, first do:
 
-`docker build -t fizzysearch .`
+`docer build -t fizzysearch .`
 
 And then you can run it with something like this:
 
